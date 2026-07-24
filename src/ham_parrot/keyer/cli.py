@@ -56,11 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "a numeric index, or 'pulse:<name>' to force the Pulse path.",
     )
     parser.add_argument(
-        "--radio-input-device",
+        "--radio-audio-device",
         type=str,
         default=None,
-        help="Audio output device that feeds the radio's mic / line-in. "
-        "Same syntax as --mic-device but resolves against output devices.",
+        help="Audio output device on this host that feeds the radio's mic / line-in. "
+        "Same device-hint syntax as --mic-device but resolves against output devices "
+        "(e.g. `alsa_output.usb-...` on Linux). Do NOT pass a source / input name here.",
     )
     parser.add_argument(
         "--monitor-enable",
@@ -75,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional monitor output device (only used when --monitor-enable is set). "
-        "Same syntax as --radio-input-device. Leave unset to use the OS default output.",
+        "Same syntax as --radio-audio-device. Leave unset to use the OS default output.",
     )
     parser.add_argument(
         "--hamlib-ptt",
@@ -88,15 +89,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "without PTT (VOX / manual keying).",
     )
     parser.add_argument(
-        "--mic-level",
+        "--mic-passthrough-level",
         type=float,
         default=100.0,
         metavar="0-100",
-        help="Gain applied to the mic passthrough, 0-100 (default: 100 = unity). "
-        "Drop below 100 to attenuate a hot mic; ham-parrot cannot boost above unity.",
+        help="Gain applied to the live mic -> radio passthrough, 0-100 (default: 100 = "
+        "unity). Recording is always captured at the raw mic level; this knob only "
+        "scales what the radio hears live. ham-parrot cannot boost above unity.",
     )
     parser.add_argument(
-        "--recorder-out-level",
+        "--playback-level",
         type=float,
         default=100.0,
         metavar="0-100",
@@ -109,7 +111,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=100.0,
         metavar="0-100",
         help="Gain applied to the local monitor sink, 0-100 (default: 100 = unity). "
-        "Independent of --mic-level and --recorder-out-level, so you can turn "
+        "Independent of --mic-passthrough-level and --playback-level, so you can turn "
         "the monitor down without changing what the radio hears.",
     )
     parser.add_argument(
@@ -137,8 +139,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _validate_levels(args: argparse.Namespace) -> None:
     for name, val in (
-        ("--mic-level", args.mic_level),
-        ("--recorder-out-level", args.recorder_out_level),
+        ("--mic-passthrough-level", args.mic_passthrough_level),
+        ("--playback-level", args.playback_level),
         ("--monitor-level", args.monitor_level),
     ):
         if not (0.0 <= val <= 100.0):
@@ -147,7 +149,7 @@ def _validate_levels(args: argparse.Namespace) -> None:
 
 def _resolve_devices(args: argparse.Namespace) -> tuple[AudioTarget, AudioTarget, AudioTarget | None]:
     mic = resolve_audio_target(args.mic_device, kind="input")
-    radio = resolve_audio_target(args.radio_input_device, kind="output")
+    radio = resolve_audio_target(args.radio_audio_device, kind="output")
     # Monitor is opt-in. With --monitor-enable and no --monitor-device,
     # resolve_audio_target(None, ...) returns an unbound AudioTarget which
     # the LiveOutputStream opens against the OS default output.
@@ -230,8 +232,8 @@ def _run(args: argparse.Namespace) -> int:
         radio_target=radio,
         monitor_target=monitor,
         recording_path=args.recording_path,
-        mic_level_percent=args.mic_level,
-        recorder_out_level_percent=args.recorder_out_level,
+        mic_passthrough_level_percent=args.mic_passthrough_level,
+        playback_level_percent=args.playback_level,
         monitor_level_percent=args.monitor_level,
         ptt_spec=args.hamlib_ptt,
     )

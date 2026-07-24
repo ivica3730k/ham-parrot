@@ -15,7 +15,7 @@ transition between modes so audio blocks never race:
                 sample so nothing is clipped as the relay drops.
 * PILOT:       mic blocks discarded; 1 kHz sine -> gain -> radio and
                 monitor, PTT keyed until user toggles off. Level knob
-                is the same ``--recorder-out-level`` used for playback,
+                is the same ``--playback-level`` used for playback,
                 so tuning it up during pilot carries over to the voice
                 sequence.
 
@@ -77,8 +77,8 @@ class Keyer:
         radio_target: AudioTarget,
         monitor_target: AudioTarget | None,
         recording_path: Path,
-        mic_gain: float,
-        recorder_out_gain: float,
+        mic_passthrough_gain: float,
+        playback_gain: float,
         monitor_gain: float,
         ptt_spec: str | None,
     ) -> None:
@@ -86,8 +86,8 @@ class Keyer:
         self._radio_target = radio_target
         self._monitor_target = monitor_target
         self._recording_path = recording_path
-        self._mic_gain = mic_gain
-        self._recorder_out_gain = recorder_out_gain
+        self._mic_passthrough_gain = mic_passthrough_gain
+        self._playback_gain = playback_gain
         self._monitor_gain = monitor_gain
         self._ptt_spec = ptt_spec
 
@@ -242,13 +242,13 @@ class Keyer:
         # into the mic acoustically, and produces the "microphony" howl.
         if not recording and self._radio_sink is not None:
             try:
-                self._radio_sink.write(block * self._mic_gain)
+                self._radio_sink.write(block * self._mic_passthrough_gain)
             except Exception as exc:
                 _log.warning("radio sink write failed: %s", exc)
 
         if recording and recorder is not None:
             # Recording captures the raw pre-gain mic signal so
-            # ``--mic-level`` does not bake into the WAV file.
+            # ``--mic-passthrough-level`` does not bake into the WAV file.
             try:
                 recorder.write(block.astype(np.float32, copy=False))
             except Exception as exc:
@@ -308,7 +308,7 @@ class Keyer:
                     if self._stop_event.is_set():
                         break
                     chunk = samples[start : start + BLOCK_FRAMES]
-                    self._emit(chunk, self._recorder_out_gain)
+                    self._emit(chunk, self._playback_gain)
                 completed = not self._stop_event.is_set()
         except PTTError as exc:
             _log.error("playback aborted: %s", exc)
@@ -326,7 +326,7 @@ class Keyer:
     # ---- Pilot -----------------------------------------------------------
 
     def _run_pilot(self) -> None:
-        """Emit a 1 kHz sine at ``recorder_out_gain`` until the user hits
+        """Emit a 1 kHz sine at ``playback_gain`` until the user hits
         'p' again (which sets ``_pilot_toggle_requested``)."""
         phase_step = 2.0 * np.pi * _PILOT_TONE_HZ / SAMPLE_RATE_HZ
         phase = 0.0
@@ -341,7 +341,7 @@ class Keyer:
                     t = phase + phase_step * np.arange(BLOCK_FRAMES, dtype=np.float64)
                     block = np.sin(t).astype(np.float32)
                     phase = (phase + phase_step * BLOCK_FRAMES) % (2.0 * np.pi)
-                    self._emit(block, self._recorder_out_gain)
+                    self._emit(block, self._playback_gain)
         except PTTError as exc:
             _log.error("pilot aborted: %s", exc)
             print(f"pilot aborted: {exc}")
@@ -414,8 +414,8 @@ def build_keyer(
     radio_target: AudioTarget,
     monitor_target: AudioTarget | None,
     recording_path: Path,
-    mic_level_percent: float,
-    recorder_out_level_percent: float,
+    mic_passthrough_level_percent: float,
+    playback_level_percent: float,
     monitor_level_percent: float,
     ptt_spec: str | None,
 ) -> Keyer:
@@ -424,8 +424,8 @@ def build_keyer(
         radio_target=radio_target,
         monitor_target=monitor_target,
         recording_path=recording_path,
-        mic_gain=_percent_to_gain(mic_level_percent),
-        recorder_out_gain=_percent_to_gain(recorder_out_level_percent),
+        mic_passthrough_gain=_percent_to_gain(mic_passthrough_level_percent),
+        playback_gain=_percent_to_gain(playback_level_percent),
         monitor_gain=_percent_to_gain(monitor_level_percent),
         ptt_spec=ptt_spec,
     )
