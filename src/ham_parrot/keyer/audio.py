@@ -87,6 +87,34 @@ def _pactl_lookup_id(id_str: str, *, kind: str) -> str | None:
     return None
 
 
+def _pactl_has_endpoint(name: str, *, kind: str) -> bool:
+    """True iff ``name`` is an exact match in ``pactl list short sinks``
+    (for ``kind='output'``) or ``pactl list short sources`` (for
+    ``kind='input'``). Falls back to False on any pactl error, so
+    callers still get the sounddevice / raw-pulse paths as a fallback.
+
+    Used to force the paplay / parec subprocess path when the hint
+    names a real Pulse endpoint, because PortAudio's Pulse compat has
+    a habit of routing sounddevice indices via the OS-default sink
+    even when the enumerated name looked like a specific device.
+    """
+    if not shutil.which("pactl"):
+        return False
+    subcmd = "sources" if kind == "input" else "sinks"
+    try:
+        proc = subprocess.run(
+            ["pactl", "list", "short", subcmd],
+            capture_output=True, text=True, check=True, timeout=5.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    for line in proc.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 2 and fields[1] == name:
+            return True
+    return False
+
+
 def _resolve_pulse(ref: str, *, kind: str) -> AudioTarget:
     """Handle explicit ``pulse:<x>`` where ``<x>`` is either a Pulse
     sink/source name or a numeric index."""
@@ -105,6 +133,21 @@ def resolve_audio_target(name_hint: str | None, *, kind: str) -> AudioTarget:
     """Turn a user-supplied device hint into a concrete backend target.
 
     ``kind`` is ``"input"`` or ``"output"``.
+
+    Resolution order for a non-empty name hint:
+
+    1. ``pulse:<x>``  -> force the paplay / parec path (respected exactly).
+    2. Numeric index -> pactl lookup; falls back to a sounddevice index.
+    3. Exact match in ``pactl list short sinks`` (output) or ``sources``
+       (input) -> paplay / parec with that Pulse name. Checked BEFORE the
+       sounddevice substring match because PortAudio's Pulse compat
+       routes sounddevice indices via the OS-default sink even when the
+       enumerated name looked specific -- so a hint like
+       ``alsa_output.usb-...`` was landing on laptop speakers instead
+       of the target sink.
+    4. Substring match against a sounddevice enumerated device name.
+    5. paplay / parec fall-through if the subprocess tool is on PATH.
+    6. OS default (empty target).
     """
     if not name_hint:
         return AudioTarget()
@@ -118,6 +161,10 @@ def resolve_audio_target(name_hint: str | None, *, kind: str) -> AudioTarget:
             _log.debug("hint %s -> pulse:%s (via pactl)", name_hint, resolved)
             return AudioTarget(pulse_name=resolved)
         return AudioTarget(sd_index=int(name_hint))
+
+    if _pactl_has_endpoint(name_hint, kind=kind):
+        _log.debug("device hint %r -> pulse subprocess (exact pactl match)", name_hint)
+        return AudioTarget(pulse_name=name_hint)
 
     sd = sounddevice
     channel_attr = "max_input_channels" if kind == "input" else "max_output_channels"
