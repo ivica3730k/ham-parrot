@@ -28,6 +28,7 @@ Repository = "https://github.com/ivica3730k/ham-parrot"
 [tool.poetry.dependencies]
 python = "^3.10"
 numpy = "^2.0"
+scipy = "^1.11"
 soundfile = "^0.12"
 sounddevice = "^0.5"
 

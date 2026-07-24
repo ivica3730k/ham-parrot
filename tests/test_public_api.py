@@ -10,12 +10,17 @@ import sys
 
 import pytest
 
+from pathlib import Path
+
 from ham_parrot.keyer import ConfigError, HamParrotError, PTTError
 from ham_parrot.keyer.constants import (
     HAMLIB_DEFAULT_PORT,
     SAMPLE_RATE_HZ,
 )
+from ham_parrot.keyer.filter import EQ_BANDS_HZ, load_eq_json
 from ham_parrot.keyer.ptt import parse_endpoint
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_exception_hierarchy() -> None:
@@ -50,6 +55,36 @@ def test_sample_rate_is_48khz() -> None:
     # 48 kHz is chosen so we skip resampling entirely -- catches
     # accidental drift to 44.1 kHz or 16 kHz.
     assert SAMPLE_RATE_HZ == 48000
+
+
+def test_eq_bands_are_iso_third_octave() -> None:
+    # Renaming or reordering the band list is a breaking change to the
+    # --eq-json schema; keep this assertion in lock-step with the docs.
+    assert EQ_BANDS_HZ == (
+        100, 125, 160, 200, 250, 315, 400, 500, 630, 800,
+        1000, 1250, 1600, 2000, 2500, 3150, 4000,
+    )
+
+
+def test_load_eq_json_flat_example() -> None:
+    gains = load_eq_json(_REPO_ROOT / "examples" / "flat.eq.json")
+    assert set(gains.keys()) == set(EQ_BANDS_HZ)
+    assert all(v == -6.0 for v in gains.values())
+
+
+def test_load_eq_json_rejects_missing_band(tmp_path: Path) -> None:
+    incomplete = tmp_path / "eq.json"
+    incomplete.write_text('{"100": 0}')
+    with pytest.raises(ConfigError, match="bands must be exactly"):
+        load_eq_json(incomplete)
+
+
+def test_load_eq_json_rejects_unknown_band(tmp_path: Path) -> None:
+    bad = tmp_path / "eq.json"
+    payload = ", ".join(f'"{f}": 0' for f in EQ_BANDS_HZ)
+    bad.write_text("{" + payload + ', "9999": 0}')
+    with pytest.raises(ConfigError, match="bands must be exactly"):
+        load_eq_json(bad)
 
 
 def test_cli_help_smoke() -> None:

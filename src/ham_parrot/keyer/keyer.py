@@ -50,6 +50,7 @@ from ham_parrot.keyer.audio import (
 )
 from ham_parrot.keyer.constants import BLOCK_FRAMES, PRE_KEY_DRAIN_SECONDS, SAMPLE_RATE_HZ
 from ham_parrot.keyer.exceptions import HamParrotError, PTTError
+from ham_parrot.keyer.filter import RadioFilter, build_radio_sos
 from ham_parrot.keyer.ptt import hamlib_ptt, read_ptt
 
 _log = logging.getLogger("ham_parrot.keyer")
@@ -81,6 +82,7 @@ class Keyer:
         playback_gain: float,
         monitor_gain: float,
         ptt_spec: str | None,
+        eq_gains_db: dict[int, float] | None = None,
     ) -> None:
         self._mic_target = mic_target
         self._radio_target = radio_target
@@ -90,6 +92,13 @@ class Keyer:
         self._playback_gain = playback_gain
         self._monitor_gain = monitor_gain
         self._ptt_spec = ptt_spec
+
+        # Radio-side filter: 100 Hz - 4 kHz bandpass, optional peaking EQ.
+        # State is continuous across passthrough / playback / pilot -- avoids
+        # a click at the switch, and the modes are mutually exclusive so
+        # there is no per-stream contention.
+        sos = build_radio_sos(SAMPLE_RATE_HZ, eq_gains_db=eq_gains_db)
+        self._radio_filter = RadioFilter(sos)
 
         self._mic_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=64)
         self._mode = _MODE_PASSTHROUGH
@@ -240,15 +249,13 @@ class Keyer:
         # the radio. Otherwise the operator's voice comes back through
         # the radio's monitor / speaker while they're speaking, loops
         # into the mic acoustically, and produces the "microphony" howl.
-        if not recording and self._radio_sink is not None:
-            try:
-                self._radio_sink.write(block * self._mic_passthrough_gain)
-            except Exception as exc:
-                _log.warning("radio sink write failed: %s", exc)
+        if not recording:
+            self._write_to_radio(block, self._mic_passthrough_gain)
 
         if recording and recorder is not None:
-            # Recording captures the raw pre-gain mic signal so
-            # ``--mic-passthrough-level`` does not bake into the WAV file.
+            # Recording captures the raw pre-gain, pre-filter mic signal
+            # so ``--mic-passthrough-level`` and the radio bandpass / EQ
+            # do not bake into the WAV file.
             try:
                 recorder.write(block.astype(np.float32, copy=False))
             except Exception as exc:
@@ -259,20 +266,29 @@ class Keyer:
         Used for playback + pilot (on-air content); mic passthrough uses
         its own radio-only path so the monitor never carries mic audio.
 
-        The monitor gets ``--monitor-level`` regardless of what the radio
-        gets, so the operator can turn the local monitor down without
-        changing playback drive to the radio.
+        The radio path is bandpass-filtered (and EQ'd when configured);
+        the monitor gets the raw source so the operator hears what the
+        transmit chain sounds like before filtering.
         """
-        if self._radio_sink is not None:
-            try:
-                self._radio_sink.write(source * radio_gain)
-            except Exception as exc:
-                _log.warning("radio sink write failed: %s", exc)
+        self._write_to_radio(source, radio_gain)
         if self._monitor_sink is not None:
             try:
                 self._monitor_sink.write(source * self._monitor_gain)
             except Exception as exc:
                 _log.warning("monitor sink write failed: %s", exc)
+
+    def _write_to_radio(self, source: np.ndarray, gain: float) -> None:
+        """Common radio-write path: gain, then filter (bandpass + EQ),
+        then write. All three call-sites (passthrough, playback, pilot)
+        go through here so the filter chain is applied uniformly."""
+        if self._radio_sink is None:
+            return
+        audio = np.asarray(source, dtype=np.float32) * gain
+        audio = self._radio_filter.apply(audio)
+        try:
+            self._radio_sink.write(audio)
+        except Exception as exc:
+            _log.warning("radio sink write failed: %s", exc)
 
     def _drain_mic_queue(self) -> None:
         """Discard any pending mic blocks. Called just before entering a
@@ -418,6 +434,7 @@ def build_keyer(
     playback_level_percent: float,
     monitor_level_percent: float,
     ptt_spec: str | None,
+    eq_gains_db: dict[int, float] | None = None,
 ) -> Keyer:
     return Keyer(
         mic_target=mic_target,
@@ -428,6 +445,7 @@ def build_keyer(
         playback_gain=_percent_to_gain(playback_level_percent),
         monitor_gain=_percent_to_gain(monitor_level_percent),
         ptt_spec=ptt_spec,
+        eq_gains_db=eq_gains_db,
     )
 
 

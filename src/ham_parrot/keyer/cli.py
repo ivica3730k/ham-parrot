@@ -28,6 +28,7 @@ from typing import Sequence
 from ham_parrot.keyer.audio import AudioTarget, resolve_audio_target
 from ham_parrot.keyer.constants import DEFAULT_LOG_PATH, RECORDING_PATH
 from ham_parrot.keyer.exceptions import ConfigError, HamParrotError
+from ham_parrot.keyer.filter import load_eq_json
 from ham_parrot.keyer.keyer import build_keyer
 
 _log = logging.getLogger("ham_parrot.cli")
@@ -120,6 +121,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=RECORDING_PATH,
         help=f"Where to store / read the recorded voice sequence "
         f"(default: ./{RECORDING_PATH}).",
+    )
+    parser.add_argument(
+        "--eq-json",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional 17-band peaking EQ, applied on top of the mandatory "
+        "100 Hz - 4 kHz radio bandpass. JSON keys are the ISO 1/3-octave "
+        "centre frequencies (100, 125, 160, 200, 250, 315, 400, 500, 630, "
+        "800, 1000, 1250, 1600, 2000, 2500, 3150, 4000); values are gain "
+        "in dB. All 17 bands MUST be present -- omitted or unknown bands "
+        "are rejected up front. See examples/flat.eq.json.",
     )
     parser.add_argument(
         "--log-file",
@@ -233,6 +246,10 @@ def _run(args: argparse.Namespace) -> int:
         args.hamlib_ptt or "off",
     )
 
+    eq_gains_db = load_eq_json(args.eq_json) if args.eq_json is not None else None
+    if eq_gains_db is not None:
+        _log.info("--eq-json %s: %d bands loaded", args.eq_json, len(eq_gains_db))
+
     keyer = build_keyer(
         mic_target=mic,
         radio_target=radio,
@@ -242,6 +259,7 @@ def _run(args: argparse.Namespace) -> int:
         playback_level_percent=args.playback_level,
         monitor_level_percent=args.monitor_level,
         ptt_spec=args.hamlib_ptt,
+        eq_gains_db=eq_gains_db,
     )
 
     stop_event = threading.Event()

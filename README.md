@@ -50,6 +50,18 @@ Enter, playback is refused so you don't collide with an ongoing over.
 | `--mic-passthrough-level 0-100` | Gain (percent, linear) applied to the live mic → radio passthrough. Recording is always captured at raw mic level; this only scales what the radio hears live. |
 | `--playback-level 0-100` | Gain applied to `recording.wav` (and the pilot tone) on the radio path. 100 = unity. |
 | `--monitor-level 0-100` | Gain applied to the local monitor sink, independent of the radio-side gains. |
+| `--eq-json PATH` | Optional 17-band peaking EQ (ISO 1/3-octave centres, 100 Hz – 4 kHz). See [`examples/flat.eq.json`](./examples/flat.eq.json) for the required schema. |
+
+## Audio processing
+
+Everything sent to the radio (mic passthrough, playback, pilot) is filtered:
+
+- Butterworth **bandpass 100 Hz – 4 kHz** (4th order per edge → ~48 dB/octave rolloff), always on.
+- Optional **17-band peaking EQ** on the ISO 1/3-octave centres, controlled by `--eq-json`.
+
+The monitor sink is fed the **raw** source so you can hear what your voice
+actually sounds like uncoloured; the recording is captured **before** the
+filter for the same reason (the shaping happens on-air, not in the file).
 
 Device hints accept: a substring of the OS device name (`"USB Audio"`), a
 numeric index (from `pactl list short sinks` on Linux, or `sounddevice`'s device
