@@ -36,11 +36,15 @@ EQ_BANDS_HZ: tuple[int, ...] = (
     1000, 1250, 1600, 2000, 2500, 3150, 4000,
 )
 
-#: Q for the peaking EQ biquads. 1.41 (≈√2) is the graphic-EQ default
-#: where adjacent 1/3-octave bands sum cleanly under moderate boosts;
-#: sharper Q (e.g. 4.32 for a mathematically-exact 1/3-octave
-#: passband) makes bands independent but creates ripple when combined.
-_EQ_Q: float = 1.41
+#: Q for the peaking EQ biquads. Picked empirically so a uniform
+#: N dB setting across all 17 bands produces ~N dB of overall
+#: response instead of ~4N dB of stacking. Broader Q (e.g. 1.4)
+#: makes neighbours' skirts overlap so every biquad's cut lands on
+#: every other biquad's centre and the attenuation multiplies -- at
+#: Q≈1.4 a "flat -6 dB" curve delivers about -23 dB, which sounds
+#: silent. Q=8 keeps each biquad tight enough that the bands act
+#: mostly independently.
+_EQ_Q: float = 8.0
 
 #: Order of the Butterworth bandpass. 4 SOS stages per band edge
 #: => ~48 dB / octave rolloff, tight enough that anything past ~5 kHz
