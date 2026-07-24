@@ -44,7 +44,7 @@ Enter, playback is refused so you don't collide with an ongoing over.
 | ---- | ------- |
 | `--mic-device` | Audio input to read your voice from. Same device-hint syntax as `--radio-input-device`. |
 | `--radio-input-device` | Audio output that feeds into the radio's mic / line-in. From the radio's point of view this is its *input*. |
-| `--monitor-enable` | Turn on local monitoring (off by default). |
+| `--monitor-enable` | Turn on local monitoring (off by default). Monitor plays back only what is being transmitted from the recording / pilot tone — the live mic passthrough is not routed to the monitor to avoid the operator hearing their own voice with headphone lag. |
 | `--monitor-device` | Optional monitor output device (only used when `--monitor-enable` is set). Leave unset for the OS default. |
 | `--hamlib-ptt HOST:PORT` | rigctld endpoint. Bare `--hamlib-ptt` defaults to `localhost:4532`. |
 | `--mic-level 0-100` | Gain (percent, linear) applied to the mic passthrough to the radio. 100 = unity. |

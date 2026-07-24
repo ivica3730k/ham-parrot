@@ -229,7 +229,14 @@ class Keyer:
             self._forward_mic_block(block)
 
     def _forward_mic_block(self, block: np.ndarray) -> None:
-        self._emit(block, self._mic_gain)
+        # Mic passthrough goes to the radio only. The monitor is reserved
+        # for playback / pilot so the operator hears what's actually being
+        # transmitted, not their own voice echoed back with headphone lag.
+        if self._radio_sink is not None:
+            try:
+                self._radio_sink.write(block * self._mic_gain)
+            except Exception as exc:
+                _log.warning("radio sink write failed: %s", exc)
         # Snapshot mode + recorder under lock so a toggle mid-block can't
         # tear the WAV file. Recording captures the raw pre-gain mic
         # signal, so ``--mic-level`` doesn't bake into the WAV.
@@ -244,9 +251,13 @@ class Keyer:
 
     def _emit(self, source: np.ndarray, radio_gain: float) -> None:
         """Scale ``source`` independently for each sink and write it out.
+        Used for playback + pilot (on-air content); mic passthrough uses
+        its own radio-only path so the monitor never carries mic audio.
+
         The monitor gets ``--monitor-level`` regardless of what the radio
         gets, so the operator can turn the local monitor down without
-        changing mic drive / recorded-audio drive to the radio."""
+        changing playback drive to the radio.
+        """
         if self._radio_sink is not None:
             try:
                 self._radio_sink.write(source * radio_gain)
