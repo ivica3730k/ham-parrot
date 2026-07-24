@@ -87,44 +87,6 @@ def _pactl_lookup_id(id_str: str, *, kind: str) -> str | None:
     return None
 
 
-def _pactl_endpoint_kind(name: str) -> str | None:
-    """Look ``name`` up in ``pactl list short sinks`` and
-    ``pactl list short sources``. Returns ``"output"`` if it's a sink,
-    ``"input"`` if it's a source, or ``None`` if pactl is missing /
-    errors / has no matching row.
-
-    Used to catch source-vs-sink mix-ups before ``paplay`` silently falls
-    back to the OS default and dumps audio to laptop speakers.
-    """
-    if not shutil.which("pactl"):
-        return None
-    try:
-        sinks = subprocess.run(
-            ["pactl", "list", "short", "sinks"],
-            capture_output=True, text=True, check=True, timeout=5.0,
-        )
-        sources = subprocess.run(
-            ["pactl", "list", "short", "sources"],
-            capture_output=True, text=True, check=True, timeout=5.0,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        _log.warning("pactl lookup failed for %s: %s", name, exc)
-        return None
-
-    def _has(text: str) -> bool:
-        for line in text.splitlines():
-            fields = line.split("\t")
-            if len(fields) >= 2 and fields[1] == name:
-                return True
-        return False
-
-    if _has(sinks.stdout):
-        return "output"
-    if _has(sources.stdout):
-        return "input"
-    return None
-
-
 def _resolve_pulse(ref: str, *, kind: str) -> AudioTarget:
     """Handle explicit ``pulse:<x>`` where ``<x>`` is either a Pulse
     sink/source name or a numeric index."""
@@ -178,26 +140,6 @@ def resolve_audio_target(name_hint: str | None, *, kind: str) -> AudioTarget:
 
     tool = "parec" if kind == "input" else "paplay"
     if shutil.which(tool):
-        # Cross-check pactl so a source-vs-sink mix-up doesn't silently
-        # fall through to the OS default. Very common footgun: users copy
-        # ``alsa_input.usb-...`` into ``--radio-input-device`` when they
-        # want ``alsa_output.usb-...``, and the pilot lands on laptop
-        # speakers instead of the radio's audio-in.
-        actual_kind = _pactl_endpoint_kind(name_hint)
-        if actual_kind is not None and actual_kind != kind:
-            swap = ""
-            if name_hint.startswith("alsa_input.") and kind == "output":
-                swap = " Try " + repr(name_hint.replace("alsa_input.", "alsa_output.", 1)) + "."
-            elif name_hint.startswith("alsa_output.") and kind == "input":
-                swap = " Try " + repr(name_hint.replace("alsa_output.", "alsa_input.", 1)) + "."
-            raise ConfigError(
-                f"{name_hint!r} is a Pulse {actual_kind}, but a {kind} device is required.{swap}"
-            )
-        if actual_kind is None and shutil.which("pactl"):
-            _log.warning(
-                "Pulse endpoint %r not found via pactl; opening it anyway "
-                "(paplay/parec will error if it truly does not exist).", name_hint,
-            )
         _log.debug("device hint %r -> pulse subprocess (%s --device=%s)",
                    name_hint, tool, name_hint)
         return AudioTarget(pulse_name=name_hint)
