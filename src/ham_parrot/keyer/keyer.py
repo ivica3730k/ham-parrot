@@ -50,7 +50,9 @@ from ham_parrot.keyer.audio import (
 )
 from ham_parrot.keyer.constants import (
     BLOCK_FRAMES,
+    CLIP_WARN_INTERVAL_SECONDS,
     MAX_LEVEL_PERCENT,
+    MIC_CLIP_THRESHOLD,
     PRE_KEY_DRAIN_SECONDS,
     SAMPLE_RATE_HZ,
 )
@@ -107,6 +109,9 @@ class Keyer:
         # there is no per-stream contention.
         sos = build_radio_sos(SAMPLE_RATE_HZ, eq_gains_db=eq_gains_db)
         self._radio_filter = RadioFilter(sos)
+
+        # Rate-limits the mic-clip warning so a hot mic doesn't flood stdout.
+        self._last_clip_warn_time: float = 0.0
 
         self._mic_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=64)
         self._mode = _MODE_PASSTHROUGH
@@ -247,6 +252,16 @@ class Keyer:
             self._forward_mic_block(block)
 
     def _forward_mic_block(self, block: np.ndarray) -> None:
+        # Warn (rate-limited) if the raw mic hits the ADC ceiling. Check
+        # runs before gain so we're flagging the actual capture chain,
+        # not our own boost.
+        peak = float(np.max(np.abs(block))) if block.size else 0.0
+        if peak >= MIC_CLIP_THRESHOLD:
+            now = time.monotonic()
+            if now - self._last_clip_warn_time >= CLIP_WARN_INTERVAL_SECONDS:
+                print(f"mic clipping (peak={peak:.3f}) -- back off the mic or lower input gain")
+                self._last_clip_warn_time = now
+
         # Snapshot mode + recorder under lock so a toggle mid-block can't
         # tear the WAV file.
         with self._mode_lock:
