@@ -1,0 +1,308 @@
+name: Release artifacts
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-wheel:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.5"
+
+      - name: Set version from tag
+        run: poetry version "${GITHUB_REF_NAME#v}"
+
+      - name: Build
+        run: poetry build
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+
+  build-binary:
+    name: Build portable Linux binary (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.5"
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf libportaudio2 libsndfile1 scons musl-tools
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set version from tag
+        run: poetry version "${{ steps.ver.outputs.version }}"
+
+      - name: Install project and build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install pyinstaller staticx
+
+      - name: Strip RUNPATH from Python libs (staticx compatibility)
+        run: |
+          find "$pythonLocation/lib" \( -name '*.so' -o -name '*.so.*' \) \
+            -exec patchelf --remove-rpath {} +
+
+      - name: Build PyInstaller binary
+        run: |
+          pyinstaller \
+            --onefile \
+            --name ham-parrot \
+            --collect-submodules ham_parrot \
+            --collect-all sounddevice \
+            --collect-all soundfile \
+            src/ham_parrot/keyer/cli.py
+
+      - name: Make static binary (versioned + -latest aliases)
+        run: |
+          staticx dist/ham-parrot dist/ham-parrot-linux-x86_64-${{ steps.ver.outputs.version }}
+          cp dist/ham-parrot-linux-x86_64-${{ steps.ver.outputs.version }} dist/ham-parrot-linux-x86_64-latest
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/ham-parrot-linux-x86_64-${{ steps.ver.outputs.version }}
+            dist/ham-parrot-linux-x86_64-latest
+
+  build-binary-arm64:
+    name: Build portable Linux binary (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.5"
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf libportaudio2 libsndfile1 scons musl-tools
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set version from tag
+        run: poetry version "${{ steps.ver.outputs.version }}"
+
+      - name: Install project and build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install pyinstaller staticx
+
+      - name: Strip RUNPATH from Python libs (staticx compatibility)
+        run: |
+          find "$pythonLocation/lib" \( -name '*.so' -o -name '*.so.*' \) \
+            -exec patchelf --remove-rpath {} +
+
+      - name: Build PyInstaller binary
+        run: |
+          pyinstaller \
+            --onefile \
+            --name ham-parrot \
+            --collect-submodules ham_parrot \
+            --collect-all sounddevice \
+            --collect-all soundfile \
+            src/ham_parrot/keyer/cli.py
+
+      - name: Make static binary (versioned + -latest aliases)
+        run: |
+          staticx dist/ham-parrot dist/ham-parrot-linux-arm64-${{ steps.ver.outputs.version }}
+          cp dist/ham-parrot-linux-arm64-${{ steps.ver.outputs.version }} dist/ham-parrot-linux-arm64-latest
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/ham-parrot-linux-arm64-${{ steps.ver.outputs.version }}
+            dist/ham-parrot-linux-arm64-latest
+
+  build-deb:
+    name: Build Ubuntu .deb (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.5"
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rubygems build-essential libportaudio2 libsndfile1
+          sudo gem install --no-document fpm
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set version from tag
+        run: poetry version "${{ steps.ver.outputs.version }}"
+
+      - name: Install project and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install pyinstaller
+
+      - name: Build Linux binary
+        run: |
+          pyinstaller \
+            --onefile \
+            --name ham-parrot \
+            --collect-submodules ham_parrot \
+            --collect-all sounddevice \
+            --collect-all soundfile \
+            src/ham_parrot/keyer/cli.py
+
+      - name: Stage files for packaging
+        run: |
+          mkdir -p pkgroot/usr/bin
+          install -m 0755 dist/ham-parrot pkgroot/usr/bin/ham-parrot
+
+      - name: Build .deb
+        run: |
+          fpm -s dir -t deb \
+            -n ham-parrot \
+            -v "${{ steps.ver.outputs.version }}" \
+            --description "Voice keyer for ham radio: mic passthrough plus one-key playback of a recorded voice sequence." \
+            --maintainer "Ivica <ivica.matic@groupnexus.co.uk>" \
+            --depends libportaudio2 \
+            --depends libsndfile1 \
+            --architecture amd64 \
+            -C pkgroot \
+            usr
+
+      - name: Alias .deb with -latest suffix
+        run: cp ham-parrot_${{ steps.ver.outputs.version }}_amd64.deb ham-parrot_amd64-latest.deb
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            ham-parrot_${{ steps.ver.outputs.version }}_amd64.deb
+            ham-parrot_amd64-latest.deb
+
+  build-deb-arm64:
+    name: Build arm64 .deb (Raspberry Pi OS 64-bit)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.5"
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rubygems build-essential libportaudio2 libsndfile1
+          sudo gem install --no-document fpm
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set version from tag
+        run: poetry version "${{ steps.ver.outputs.version }}"
+
+      - name: Install project and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install pyinstaller
+
+      - name: Build Linux binary
+        run: |
+          pyinstaller \
+            --onefile \
+            --name ham-parrot \
+            --collect-submodules ham_parrot \
+            --collect-all sounddevice \
+            --collect-all soundfile \
+            src/ham_parrot/keyer/cli.py
+
+      - name: Stage files for packaging
+        run: |
+          mkdir -p pkgroot/usr/bin
+          install -m 0755 dist/ham-parrot pkgroot/usr/bin/ham-parrot
+
+      - name: Build .deb
+        run: |
+          fpm -s dir -t deb \
+            -n ham-parrot \
+            -v "${{ steps.ver.outputs.version }}" \
+            --description "Voice keyer for ham radio: mic passthrough plus one-key playback of a recorded voice sequence." \
+            --maintainer "Ivica <ivica.matic@groupnexus.co.uk>" \
+            --depends libportaudio2 \
+            --depends libsndfile1 \
+            --architecture arm64 \
+            -C pkgroot \
+            usr
+
+      - name: Alias .deb with -latest suffix
+        run: cp ham-parrot_${{ steps.ver.outputs.version }}_arm64.deb ham-parrot_arm64-latest.deb
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            ham-parrot_${{ steps.ver.outputs.version }}_arm64.deb
+            ham-parrot_arm64-latest.deb

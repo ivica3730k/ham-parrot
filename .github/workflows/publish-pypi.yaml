@@ -1,0 +1,39 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build + publish wheel + sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.5"
+
+      - name: Set version from tag
+        run: poetry version "${GITHUB_REF_NAME#v}"
+
+      - name: Generate PyPI README with tag-locked permalinks
+        run: python scripts/build_pypi_readme.py "${GITHUB_REF_NAME}"
+
+      - name: Build sdist + wheel
+        run: poetry build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}

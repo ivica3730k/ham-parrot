@@ -1,0 +1,87 @@
+[tool.poetry]
+name = "ham-parrot"
+version = "0.0.0"
+description = "Voice keyer for ham radio: live mic passthrough plus one-key playback of a pre-recorded voice sequence, with hamlib PTT."
+authors = ["ivica3730k"]
+license = "MIT"
+readme = "readme-pypi.md"
+packages = [{ include = "ham_parrot/keyer", from = "src" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Telecommunications Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Ham Radio",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+[tool.poetry.urls]
+Homepage = "https://github.com/ivica3730k/ham-parrot"
+Repository = "https://github.com/ivica3730k/ham-parrot"
+"Bug Tracker" = "https://github.com/ivica3730k/ham-parrot/issues"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+numpy = "^2.0"
+soundfile = "^0.12"
+sounddevice = "^0.5"
+
+[tool.poetry.group.dev.dependencies]
+black = "26.3.1"
+pre-commit = "4.6.0"
+pytest = "9.0.3"
+mypy = "^2.1.0"
+pylint = "^4.0.5"
+setuptools = "82.0.1"
+pytest-xdist = "^3.8.0"
+
+[tool.poetry.scripts]
+ham-parrot = "ham_parrot.keyer.cli:main"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+  \.git
+  | \.venv
+  | build
+  | venv
+  | dist
+)/
+'''
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# F = pyflakes (unused imports F401, undefined names F821, unused vars, ...)
+# I = isort-compatible import ordering
+select = ["F", "I001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ham_parrot"]
+
+[tool.pytest.ini_options]
+addopts = "-n auto"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+mypy_path = "src"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
