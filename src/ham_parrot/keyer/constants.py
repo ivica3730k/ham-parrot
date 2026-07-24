@@ -55,3 +55,12 @@ DEFAULT_LOG_PATH: Path = Path("log.txt")
 #: further boost just clips at ±1.0. The mixer clips at unity before
 #: writing to the sinks so overshoots don't wrap into ugly artefacts.
 MAX_LEVEL_PERCENT: float = 500.0
+
+#: Raw-mic peak that triggers a "mic clipping" warning line on stdout.
+#: Slightly under 1.0 so we catch signals that would saturate the ADC
+#: on the next quantisation step.
+MIC_CLIP_THRESHOLD: float = 0.99
+
+#: Rate-limit for the mic-clip warning. Without it a hot mic floods
+#: stdout with a warning every 20 ms block.
+CLIP_WARN_INTERVAL_SECONDS: float = 1.0
