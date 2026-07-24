@@ -1,22 +1,32 @@
 """Voice-keyer state machine.
 
-Single mic input, one or two output sinks (radio + optional monitor), a
+Single mic input, a radio output sink (always on), an optional monitor
+output sink that lives only while playback / pilot is active, a
 recording tap, and a playback source. One consumer thread owns the
 transition between modes so audio blocks never race:
 
-* PASSTHROUGH: mic block -> gain -> radio + monitor
-* RECORDING:   mic block -> radio + monitor (still passthrough for
-                natural monitoring) AND -> WAV writer
-* PLAYBACK:    mic blocks discarded; WAV chunks -> gain -> radio +
-                monitor, PTT keyed for the duration
-* PILOT:       mic blocks discarded; 1 kHz sine -> gain -> radio +
+* PASSTHROUGH: mic block -> gain -> radio. Monitor is silent.
+* RECORDING:   mic block -> WAV writer only. NOT routed to the radio
+                (avoids microphony via the operator's monitor chain).
+* PLAYBACK:    mic blocks discarded; WAV chunks -> gain -> radio and
+                (freshly opened) monitor. PTT keyed for the duration
+                with a ``PRE_KEY_DRAIN_SECONDS`` silence gap before
+                key-up and ``HAMLIB_PTT_TAIL_SECONDS`` after the last
+                sample so nothing is clipped as the relay drops.
+* PILOT:       mic blocks discarded; 1 kHz sine -> gain -> radio and
                 monitor, PTT keyed until user toggles off. Level knob
                 is the same ``--recorder-out-level`` used for playback,
-                so tuning it up during pilot carries over to the
-                voice sequence.
+                so tuning it up during pilot carries over to the voice
+                sequence.
 
-Modes are switched by request-methods (``start_recording``, ``play``,
-``toggle_pilot``); the mixer thread flips state at chunk boundaries.
+The monitor sink is opened + closed inside ``_run_playback`` and
+``_run_pilot``. Keeping it always-open left residual audio in paplay's
+ring buffer that felt like the monitor "kept running" after playback
+finished.
+
+Modes are switched by request-methods (``toggle_recording``,
+``request_playback``, ``toggle_pilot``); the mixer thread flips state
+at chunk boundaries.
 """
 
 from __future__ import annotations
@@ -25,8 +35,9 @@ import logging
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator
 
 import numpy as np
 import soundfile
@@ -37,7 +48,7 @@ from ham_parrot.keyer.audio import (
     LiveOutputStream,
     read_wav,
 )
-from ham_parrot.keyer.constants import BLOCK_FRAMES, SAMPLE_RATE_HZ
+from ham_parrot.keyer.constants import BLOCK_FRAMES, PRE_KEY_DRAIN_SECONDS, SAMPLE_RATE_HZ
 from ham_parrot.keyer.exceptions import HamParrotError, PTTError
 from ham_parrot.keyer.ptt import hamlib_ptt, read_ptt
 
@@ -161,8 +172,9 @@ class Keyer:
     # ---- Main loop -------------------------------------------------------
 
     def run(self) -> None:
-        """Open streams and run the mixer until ``stop()`` is called."""
-        monitor_ctx: Optional[LiveOutputStream] = None
+        """Open the mic input + radio output sinks and run the mixer until
+        ``stop()`` is called. The monitor sink is opened per playback /
+        pilot session inside ``_run_playback`` / ``_run_pilot``."""
         with (
             LiveInputStream(
                 sample_rate=SAMPLE_RATE_HZ,
@@ -178,20 +190,9 @@ class Keyer:
         ):
             self._radio_sink = radio_sink
             try:
-                if self._monitor_target is not None:
-                    monitor_ctx = LiveOutputStream(
-                        sample_rate=SAMPLE_RATE_HZ,
-                        block_frames=BLOCK_FRAMES,
-                        target=self._monitor_target,
-                    )
-                    monitor_ctx.__enter__()
-                    self._monitor_sink = monitor_ctx
                 self._mixer_loop()
             finally:
-                if monitor_ctx is not None:
-                    monitor_ctx.__exit__(None, None, None)
                 self._radio_sink = None
-                self._monitor_sink = None
                 self._close_recorder()
 
     # ---- Mic-side capture ------------------------------------------------
@@ -229,21 +230,25 @@ class Keyer:
             self._forward_mic_block(block)
 
     def _forward_mic_block(self, block: np.ndarray) -> None:
-        # Mic passthrough goes to the radio only. The monitor is reserved
-        # for playback / pilot so the operator hears what's actually being
-        # transmitted, not their own voice echoed back with headphone lag.
-        if self._radio_sink is not None:
+        # Snapshot mode + recorder under lock so a toggle mid-block can't
+        # tear the WAV file.
+        with self._mode_lock:
+            recording = self._mode == _MODE_RECORDING
+            recorder = self._recorder
+
+        # In RECORDING mode the mic is captured to WAV and NOT routed to
+        # the radio. Otherwise the operator's voice comes back through
+        # the radio's monitor / speaker while they're speaking, loops
+        # into the mic acoustically, and produces the "microphony" howl.
+        if not recording and self._radio_sink is not None:
             try:
                 self._radio_sink.write(block * self._mic_gain)
             except Exception as exc:
                 _log.warning("radio sink write failed: %s", exc)
-        # Snapshot mode + recorder under lock so a toggle mid-block can't
-        # tear the WAV file. Recording captures the raw pre-gain mic
-        # signal, so ``--mic-level`` doesn't bake into the WAV.
-        with self._mode_lock:
-            recording = self._mode == _MODE_RECORDING
-            recorder = self._recorder
+
         if recording and recorder is not None:
+            # Recording captures the raw pre-gain mic signal so
+            # ``--mic-level`` does not bake into the WAV file.
             try:
                 recorder.write(block.astype(np.float32, copy=False))
             except Exception as exc:
@@ -285,23 +290,38 @@ class Keyer:
             samples, rate = read_wav(self._recording_path, expected_sample_rate=SAMPLE_RATE_HZ)
         except HamParrotError as exc:
             _log.error("cannot read %s: %s", self._recording_path, exc)
+            print(f"playback failed: {exc}")
             return
         _log.info("playback: %d frames @ %d Hz", samples.size, rate)
 
         with self._mode_lock:
             self._mode = _MODE_PLAYBACK
+        # Let residual mic audio drain out of the radio-sink buffer BEFORE
+        # keying PTT so the LEAD gap is actual silence rather than the tail
+        # of the operator's last syllable.
+        time.sleep(PRE_KEY_DRAIN_SECONDS)
+
+        completed = False
         try:
-            with hamlib_ptt(self._ptt_spec):
+            with self._monitor_session(), hamlib_ptt(self._ptt_spec):
                 for start in range(0, samples.size, BLOCK_FRAMES):
                     if self._stop_event.is_set():
                         break
                     chunk = samples[start : start + BLOCK_FRAMES]
                     self._emit(chunk, self._recorder_out_gain)
+                completed = not self._stop_event.is_set()
         except PTTError as exc:
             _log.error("playback aborted: %s", exc)
+            print(f"playback aborted: {exc}")
         finally:
             with self._mode_lock:
                 self._mode = _MODE_PASSTHROUGH
+            # Discard mic blocks that piled up during playback so the
+            # resumed passthrough does not burst a second of stale audio
+            # at the radio.
+            self._drain_mic_queue()
+            if completed:
+                print("playback done.")
 
     # ---- Pilot -----------------------------------------------------------
 
@@ -313,8 +333,10 @@ class Keyer:
 
         with self._mode_lock:
             self._mode = _MODE_PILOT
+        time.sleep(PRE_KEY_DRAIN_SECONDS)
+
         try:
-            with hamlib_ptt(self._ptt_spec):
+            with self._monitor_session(), hamlib_ptt(self._ptt_spec):
                 while not self._stop_event.is_set() and not self._pilot_toggle_requested.is_set():
                     t = phase + phase_step * np.arange(BLOCK_FRAMES, dtype=np.float64)
                     block = np.sin(t).astype(np.float32)
@@ -322,10 +344,45 @@ class Keyer:
                     self._emit(block, self._recorder_out_gain)
         except PTTError as exc:
             _log.error("pilot aborted: %s", exc)
+            print(f"pilot aborted: {exc}")
         finally:
             self._pilot_toggle_requested.clear()
             with self._mode_lock:
                 self._mode = _MODE_PASSTHROUGH
+            self._drain_mic_queue()
+            print("pilot off.")
+
+    # ---- Monitor session (per playback / pilot) -------------------------
+
+    @contextmanager
+    def _monitor_session(self) -> Iterator[None]:
+        """Open the monitor sink for the body, close it on exit. Closing
+        after each session guarantees no residual audio bleeds out of
+        paplay's ring buffer while the operator is back in passthrough.
+        """
+        if self._monitor_target is None:
+            yield
+            return
+        sink = LiveOutputStream(
+            sample_rate=SAMPLE_RATE_HZ,
+            block_frames=BLOCK_FRAMES,
+            target=self._monitor_target,
+        )
+        try:
+            sink.__enter__()
+        except Exception as exc:
+            _log.warning("could not open monitor sink: %s", exc)
+            yield
+            return
+        self._monitor_sink = sink
+        try:
+            yield
+        finally:
+            self._monitor_sink = None
+            try:
+                sink.__exit__(None, None, None)
+            except Exception as exc:
+                _log.warning("could not close monitor sink cleanly: %s", exc)
 
     # ---- Recorder handle -------------------------------------------------
 
@@ -374,5 +431,3 @@ def build_keyer(
     )
 
 
-# Silence unused-import warnings.
-_ = time

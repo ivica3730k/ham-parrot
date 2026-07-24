@@ -26,13 +26,21 @@ RECORDING_PATH: Path = Path("recording.wav")
 #: rigctld TCP default; matches the ``--hamlib-ptt`` bare-flag default.
 HAMLIB_DEFAULT_PORT: int = 4532
 
-#: PTT-to-audio guard. Radios need a small delay between key-up and
-#: first sample or the leading audio gets clipped by relay / AGC settling.
-HAMLIB_PTT_LEAD_SECONDS: float = 0.15
+#: PTT-to-audio guard. 100 ms of silence between PTT key-up and the
+#: first playback / pilot sample -- covers relay settling and the
+#: opening squelch tail on the receiving end.
+HAMLIB_PTT_LEAD_SECONDS: float = 0.1
 
-#: Symmetric tail: hold PTT past the last sample so the trailing audio
-#: makes it onto the air before the relay drops.
-HAMLIB_PTT_TAIL_SECONDS: float = 0.15
+#: Symmetric tail: 100 ms of silence between the last playback sample
+#: and PTT release so nothing gets clipped as the relay drops.
+HAMLIB_PTT_TAIL_SECONDS: float = 0.1
+
+#: Silence gap between the mode-flip (mic passthrough stops) and PTT
+#: key-up. Lets residual mic audio drain from the radio-sink buffer
+#: BEFORE the transmitter is keyed, so the "100 ms gap" after PTT-up
+#: is real silence rather than the tail of the operator's last syllable
+#: leaking on-air.
+PRE_KEY_DRAIN_SECONDS: float = 0.1
 
 #: Timeout for a single rigctld request/response cycle.
 HAMLIB_QUERY_TIMEOUT_SECONDS: float = 1.0
