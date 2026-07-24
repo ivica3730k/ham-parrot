@@ -163,7 +163,7 @@ def _resolve_devices(args: argparse.Namespace) -> tuple[AudioTarget, AudioTarget
     return mic, radio, monitor
 
 
-def _run_key_loop(keyer, stop_event: threading.Event) -> None:  # type: ignore[no-untyped-def]
+def _run_key_loop(keyer, stop_event: threading.Event, args, mic, radio, monitor) -> None:  # type: ignore[no-untyped-def]
     """Raw-mode stdin reader. Runs in the main thread.
 
     Uses ``selectors`` so ``stop_event`` can wake us out of the read
@@ -175,7 +175,7 @@ def _run_key_loop(keyer, stop_event: threading.Event) -> None:  # type: ignore[n
     sel.register(fd, selectors.EVENT_READ)
     try:
         tty.setcbreak(fd)
-        _print_banner(keyer)
+        _print_banner(keyer, args, mic, radio, monitor)
         while not stop_event.is_set():
             events = sel.select(timeout=0.1)
             if not events:
@@ -189,10 +189,16 @@ def _run_key_loop(keyer, stop_event: threading.Event) -> None:  # type: ignore[n
         sel.close()
 
 
-def _print_banner(keyer) -> None:  # type: ignore[no-untyped-def]
+def _print_banner(keyer, args: argparse.Namespace, mic, radio, monitor) -> None:  # type: ignore[no-untyped-def]
     have = "yes" if keyer.has_recording() else "no"
+    monitor_desc = monitor.describe() if monitor is not None else "off"
     print(
-        f"ham-parrot ready. recording present: {have} ({keyer.recording_path()})\n"
+        f"ham-parrot ready.\n"
+        f"  mic     : {mic.describe()}\n"
+        f"  radio   : {radio.describe()}\n"
+        f"  monitor : {monitor_desc}\n"
+        f"  ptt     : {args.hamlib_ptt or 'off'}\n"
+        f"  recording present: {have} ({keyer.recording_path()})\n"
         "  r = toggle record   ENTER = play   p = toggle pilot   q = quit"
     )
 
@@ -252,7 +258,7 @@ def _run(args: argparse.Namespace) -> int:
     thread.start()
 
     try:
-        _run_key_loop(keyer, stop_event)
+        _run_key_loop(keyer, stop_event, args, mic, radio, monitor)
     except KeyboardInterrupt:
         pass
     finally:

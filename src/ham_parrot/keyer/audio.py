@@ -87,34 +87,6 @@ def _pactl_lookup_id(id_str: str, *, kind: str) -> str | None:
     return None
 
 
-def _pactl_has_endpoint(name: str, *, kind: str) -> bool:
-    """True iff ``name`` is an exact match in ``pactl list short sinks``
-    (for ``kind='output'``) or ``pactl list short sources`` (for
-    ``kind='input'``). Falls back to False on any pactl error, so
-    callers still get the sounddevice / raw-pulse paths as a fallback.
-
-    Used to force the paplay / parec subprocess path when the hint
-    names a real Pulse endpoint, because PortAudio's Pulse compat has
-    a habit of routing sounddevice indices via the OS-default sink
-    even when the enumerated name looked like a specific device.
-    """
-    if not shutil.which("pactl"):
-        return False
-    subcmd = "sources" if kind == "input" else "sinks"
-    try:
-        proc = subprocess.run(
-            ["pactl", "list", "short", subcmd],
-            capture_output=True, text=True, check=True, timeout=5.0,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return False
-    for line in proc.stdout.splitlines():
-        fields = line.split("\t")
-        if len(fields) >= 2 and fields[1] == name:
-            return True
-    return False
-
-
 def _resolve_pulse(ref: str, *, kind: str) -> AudioTarget:
     """Handle explicit ``pulse:<x>`` where ``<x>`` is either a Pulse
     sink/source name or a numeric index."""
@@ -132,22 +104,14 @@ def _resolve_pulse(ref: str, *, kind: str) -> AudioTarget:
 def resolve_audio_target(name_hint: str | None, *, kind: str) -> AudioTarget:
     """Turn a user-supplied device hint into a concrete backend target.
 
-    ``kind`` is ``"input"`` or ``"output"``.
-
-    Resolution order for a non-empty name hint:
+    ``kind`` is ``"input"`` or ``"output"``. Exact logic matches the
+    gist reference:
 
     1. ``pulse:<x>``  -> force the paplay / parec path (respected exactly).
     2. Numeric index -> pactl lookup; falls back to a sounddevice index.
-    3. Exact match in ``pactl list short sinks`` (output) or ``sources``
-       (input) -> paplay / parec with that Pulse name. Checked BEFORE the
-       sounddevice substring match because PortAudio's Pulse compat
-       routes sounddevice indices via the OS-default sink even when the
-       enumerated name looked specific -- so a hint like
-       ``alsa_output.usb-...`` was landing on laptop speakers instead
-       of the target sink.
-    4. Substring match against a sounddevice enumerated device name.
-    5. paplay / parec fall-through if the subprocess tool is on PATH.
-    6. OS default (empty target).
+    3. Substring match against a sounddevice enumerated device name.
+    4. paplay / parec fall-through if the subprocess tool is on PATH.
+    5. OS default (empty target).
     """
     if not name_hint:
         return AudioTarget()
@@ -161,10 +125,6 @@ def resolve_audio_target(name_hint: str | None, *, kind: str) -> AudioTarget:
             _log.debug("hint %s -> pulse:%s (via pactl)", name_hint, resolved)
             return AudioTarget(pulse_name=resolved)
         return AudioTarget(sd_index=int(name_hint))
-
-    if _pactl_has_endpoint(name_hint, kind=kind):
-        _log.debug("device hint %r -> pulse subprocess (exact pactl match)", name_hint)
-        return AudioTarget(pulse_name=name_hint)
 
     sd = sounddevice
     channel_attr = "max_input_channels" if kind == "input" else "max_output_channels"
@@ -324,9 +284,10 @@ class LiveInputStream:
                 "--latency-msec=20",
             ],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             bufsize=0,
         )
+        _log.info("parec pid=%d --device=%s", self._proc.pid, self._target.pulse_name)
 
         def _reader() -> None:
             chunk_bytes = self._block_frames * 4  # 4 bytes / float32
@@ -334,6 +295,20 @@ class LiveInputStream:
             while not self._stop_event.is_set():
                 raw = self._proc.stdout.read(chunk_bytes)
                 if not raw:
+                    # parec closed its stdout: exited or errored. Pick up
+                    # stderr so the log shows the reason (bad device
+                    # name, permission, etc.) instead of silent death.
+                    rc = self._proc.poll() if self._proc is not None else None
+                    err = b""
+                    if self._proc is not None and self._proc.stderr is not None:
+                        try:
+                            err = self._proc.stderr.read() or b""
+                        except OSError:
+                            pass
+                    if err:
+                        _log.error("parec exited rc=%s: %s", rc, err.decode(errors="replace").strip())
+                    elif rc is not None:
+                        _log.error("parec exited rc=%s (no stderr output)", rc)
                     break
                 self._callback(np.frombuffer(raw, dtype=np.float32).copy())
 
@@ -401,6 +376,25 @@ class LiveOutputStream:
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             _log.warning("paplay pipe closed: %s", exc)
+            self._drain_stderr_on_death()
+
+    def _drain_stderr_on_death(self) -> None:
+        """If paplay has already exited, capture whatever it printed on
+        stderr so we can log the actual failure reason instead of a
+        generic BrokenPipeError."""
+        if self._proc is None or self._proc.stderr is None:
+            return
+        rc = self._proc.poll()
+        if rc is None:
+            return
+        try:
+            err = self._proc.stderr.read() or b""
+        except OSError:
+            err = b""
+        if err:
+            _log.error("paplay exited rc=%d: %s", rc, err.decode(errors="replace").strip())
+        else:
+            _log.error("paplay exited rc=%d (no stderr output)", rc)
 
     def _open_sounddevice(self) -> None:
         sd = sounddevice
@@ -415,6 +409,9 @@ class LiveOutputStream:
 
     def _open_paplay(self) -> None:
         assert self._target.pulse_name is not None
+        # Capture stderr so we can log it if paplay dies. Silent stderr
+        # was the reason a wrong / mis-permissioned device name looked
+        # like "audio just went to the default sink" from the outside.
         self._proc = subprocess.Popen(
             [
                 "paplay",
@@ -426,9 +423,10 @@ class LiveOutputStream:
                 "--latency-msec=20",
             ],
             stdin=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             bufsize=0,
         )
+        _log.info("paplay pid=%d --device=%s", self._proc.pid, self._target.pulse_name)
 
 
 def broadcast(sinks: Iterable[LiveOutputStream], samples: np.ndarray) -> None:
