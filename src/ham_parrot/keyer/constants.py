@@ -49,3 +49,9 @@ HAMLIB_QUERY_TIMEOUT_SECONDS: float = 1.0
 
 #: Where CLI diagnostics land by default (kept out of stdout).
 DEFAULT_LOG_PATH: Path = Path("log.txt")
+
+#: Upper bound on level flags (percent, linear). 100 = unity; 500 =
+#: +14 dB, plenty of headroom for a quiet mic and past the point where
+#: further boost just clips at ±1.0. The mixer clips at unity before
+#: writing to the sinks so overshoots don't wrap into ugly artefacts.
+MAX_LEVEL_PERCENT: float = 500.0

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ham_parrot.keyer.audio import AudioTarget, resolve_audio_target
-from ham_parrot.keyer.constants import DEFAULT_LOG_PATH, RECORDING_PATH
+from ham_parrot.keyer.constants import DEFAULT_LOG_PATH, MAX_LEVEL_PERCENT, RECORDING_PATH
 from ham_parrot.keyer.exceptions import ConfigError, HamParrotError
 from ham_parrot.keyer.filter import load_eq_json
 from ham_parrot.keyer.keyer import build_keyer
@@ -89,31 +89,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "localhost:4532; pass HOST:PORT to override. Omit entirely to run "
         "without PTT (VOX / manual keying).",
     )
+    level_range = f"0-{int(MAX_LEVEL_PERCENT)}"
     parser.add_argument(
         "--mic-passthrough-level",
         type=float,
         default=100.0,
-        metavar="0-100",
-        help="Gain applied to the live mic -> radio passthrough, 0-100 (default: 100 = "
-        "unity). Recording is always captured at the raw mic level; this knob only "
-        "scales what the radio hears live. ham-parrot cannot boost above unity.",
+        metavar=level_range,
+        help=f"Gain applied to the live mic -> radio passthrough, {level_range} "
+        "(default: 100 = unity, 200 = +6 dB, 500 = +14 dB). Recording is always "
+        "captured at the raw mic level; this knob only scales what the radio hears "
+        "live. Overshoots past unity are hard-clipped at ±1.0 to prevent wraparound.",
     )
     parser.add_argument(
         "--playback-level",
         type=float,
         default=100.0,
-        metavar="0-100",
-        help="Gain applied when playing the recorded sequence and the pilot tone, "
-        "0-100 (default: 100 = unity source level).",
+        metavar=level_range,
+        help=f"Gain applied when playing the recorded sequence and the pilot tone, "
+        f"{level_range} (default: 100 = unity source level, 200 = +6 dB, 500 = +14 dB).",
     )
     parser.add_argument(
         "--monitor-level",
         type=float,
         default=100.0,
-        metavar="0-100",
-        help="Gain applied to the local monitor sink, 0-100 (default: 100 = unity). "
-        "Independent of --mic-passthrough-level and --playback-level, so you can turn "
-        "the monitor down without changing what the radio hears.",
+        metavar=level_range,
+        help=f"Gain applied to the local monitor sink, {level_range} (default: 100 = "
+        "unity). Independent of --mic-passthrough-level and --playback-level, so you "
+        "can turn the monitor down without changing what the radio hears.",
     )
     parser.add_argument(
         "--recording-path",
@@ -156,8 +158,10 @@ def _validate_levels(args: argparse.Namespace) -> None:
         ("--playback-level", args.playback_level),
         ("--monitor-level", args.monitor_level),
     ):
-        if not (0.0 <= val <= 100.0):
-            raise ConfigError(f"{name} must be between 0 and 100 (got {val})")
+        if not (0.0 <= val <= MAX_LEVEL_PERCENT):
+            raise ConfigError(
+                f"{name} must be between 0 and {int(MAX_LEVEL_PERCENT)} (got {val})"
+            )
 
 
 def _resolve_devices(args: argparse.Namespace) -> tuple[AudioTarget, AudioTarget, AudioTarget | None]:

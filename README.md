@@ -47,9 +47,9 @@ Enter, playback is refused so you don't collide with an ongoing over.
 | `--monitor-enable` | Turn on local monitoring (off by default). Monitor plays back only what is being transmitted from the recording / pilot tone — the live mic passthrough is not routed to the monitor to avoid the operator hearing their own voice with headphone lag. |
 | `--monitor-device` | Optional monitor output device (only used when `--monitor-enable` is set). Leave unset for the OS default. |
 | `--hamlib-ptt HOST:PORT` | rigctld endpoint. Bare `--hamlib-ptt` defaults to `localhost:4532`. |
-| `--mic-passthrough-level 0-100` | Gain (percent, linear) applied to the live mic → radio passthrough. Recording is always captured at raw mic level; this only scales what the radio hears live. |
-| `--playback-level 0-100` | Gain applied to `recording.wav` (and the pilot tone) on the radio path. 100 = unity. |
-| `--monitor-level 0-100` | Gain applied to the local monitor sink, independent of the radio-side gains. |
+| `--mic-passthrough-level 0-500` | Gain (percent, linear) applied to the live mic → radio passthrough. 100 = unity, 200 = +6 dB, 500 = +14 dB. Overshoots past ±1.0 are hard-clipped. |
+| `--playback-level 0-500` | Gain applied to `recording.wav` (and the pilot tone) on the radio path. 100 = unity. |
+| `--monitor-level 0-500` | Gain applied to the local monitor sink, independent of the radio-side gains. |
 | `--eq-json PATH` | Optional 17-band peaking EQ (ISO 1/3-octave centres, 100 Hz – 4 kHz). See [`examples/flat.eq.json`](./examples/flat.eq.json) for the required schema. |
 
 ## Audio processing

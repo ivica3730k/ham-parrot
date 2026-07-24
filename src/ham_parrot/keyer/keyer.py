@@ -48,7 +48,12 @@ from ham_parrot.keyer.audio import (
     LiveOutputStream,
     read_wav,
 )
-from ham_parrot.keyer.constants import BLOCK_FRAMES, PRE_KEY_DRAIN_SECONDS, SAMPLE_RATE_HZ
+from ham_parrot.keyer.constants import (
+    BLOCK_FRAMES,
+    MAX_LEVEL_PERCENT,
+    PRE_KEY_DRAIN_SECONDS,
+    SAMPLE_RATE_HZ,
+)
 from ham_parrot.keyer.exceptions import HamParrotError, PTTError
 from ham_parrot.keyer.filter import RadioFilter, build_radio_sos
 from ham_parrot.keyer.ptt import hamlib_ptt, read_ptt
@@ -64,8 +69,11 @@ _PILOT_TONE_HZ = 1000.0
 
 
 def _percent_to_gain(percent: float) -> float:
-    """0-100 -> 0.0-1.0 linear gain."""
-    return max(0.0, min(percent, 100.0)) / 100.0
+    """0-MAX_LEVEL_PERCENT -> 0.0-(MAX_LEVEL_PERCENT/100) linear gain.
+    100 = unity. Above 100 is boost; the mixer hard-clips at ±1.0
+    before writing to the sinks so overshoots don't wrap into artefacts.
+    """
+    return max(0.0, min(percent, MAX_LEVEL_PERCENT)) / 100.0
 
 
 class Keyer:
@@ -272,19 +280,23 @@ class Keyer:
         """
         self._write_to_radio(source, radio_gain)
         if self._monitor_sink is not None:
+            monitor_out = np.asarray(source, dtype=np.float32) * self._monitor_gain
+            np.clip(monitor_out, -1.0, 1.0, out=monitor_out)
             try:
-                self._monitor_sink.write(source * self._monitor_gain)
+                self._monitor_sink.write(monitor_out)
             except Exception as exc:
                 _log.warning("monitor sink write failed: %s", exc)
 
     def _write_to_radio(self, source: np.ndarray, gain: float) -> None:
         """Common radio-write path: gain, then filter (bandpass + EQ),
-        then write. All three call-sites (passthrough, playback, pilot)
-        go through here so the filter chain is applied uniformly."""
+        then hard-clip at ±1.0, then write. All three call-sites
+        (passthrough, playback, pilot) go through here so the chain is
+        applied uniformly."""
         if self._radio_sink is None:
             return
         audio = np.asarray(source, dtype=np.float32) * gain
         audio = self._radio_filter.apply(audio)
+        np.clip(audio, -1.0, 1.0, out=audio)
         try:
             self._radio_sink.write(audio)
         except Exception as exc:
