@@ -67,9 +67,17 @@ def test_eq_bands_are_iso_third_octave() -> None:
 
 
 def test_load_eq_json_flat_example() -> None:
-    gains = load_eq_json(_REPO_ROOT / "examples" / "flat.eq.json")
+    gains = load_eq_json(_REPO_ROOT / "eq_examples" / "flat.json")
     assert set(gains.keys()) == set(EQ_BANDS_HZ)
-    assert all(v == -6.0 for v in gains.values())
+    assert all(v == 0.0 for v in gains.values())
+
+
+def test_load_eq_json_ssb_example() -> None:
+    gains = load_eq_json(_REPO_ROOT / "eq_examples" / "ssb.json")
+    assert set(gains.keys()) == set(EQ_BANDS_HZ)
+    # SSB curve is a voice-shaped notch: rolled-off lows, gentle presence lift.
+    assert gains[100] < gains[1000]
+    assert gains[2000] > gains[4000]
 
 
 def test_load_eq_json_rejects_missing_band(tmp_path: Path) -> None:

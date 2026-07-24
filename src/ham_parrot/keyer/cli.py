@@ -134,7 +134,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "centre frequencies (100, 125, 160, 200, 250, 315, 400, 500, 630, "
         "800, 1000, 1250, 1600, 2000, 2500, 3150, 4000); values are gain "
         "in dB. All 17 bands MUST be present -- omitted or unknown bands "
-        "are rejected up front. See examples/flat.eq.json.",
+        "are rejected up front. See eq_examples/flat.json (unity across "
+        "the passband) and eq_examples/ssb.json (voice-shaped for SSB).",
     )
     parser.add_argument(
         "--log-file",
