@@ -12,7 +12,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,58 +157,6 @@ def resolve_audio_target(name_hint: str | None, *, kind: str) -> AudioTarget:
     return AudioTarget()
 
 
-def _set_unity_gain(target: AudioTarget, *, kind: str) -> None:
-    """Best-effort: set the resolved endpoint to unity gain (100% / 0 dB)
-    and unmute before the stream opens. Failures are logged at DEBUG and
-    swallowed -- the tool still runs at whatever gain the OS had set.
-    """
-    if target.pulse_name is not None:
-        _pactl_set_unity(target.pulse_name, kind=kind)
-        return
-    if sys.platform == "darwin":
-        _osascript_set_unity(kind=kind)
-        return
-    if sys.platform.startswith("linux"):
-        _pactl_set_unity("@DEFAULT_SOURCE@" if kind == "input" else "@DEFAULT_SINK@", kind=kind)
-
-
-def _pactl_set_unity(endpoint: str, *, kind: str) -> None:
-    if not shutil.which("pactl"):
-        _log.debug("pactl not on PATH; skipping unity-gain set for %s %s", kind, endpoint)
-        return
-    vol_cmd = "set-source-volume" if kind == "input" else "set-sink-volume"
-    mute_cmd = "set-source-mute" if kind == "input" else "set-sink-mute"
-    for args in ([vol_cmd, endpoint, "100%"], [mute_cmd, endpoint, "0"]):
-        try:
-            subprocess.run(
-                ["pactl", *args], check=True, timeout=2.0, capture_output=True,
-            )
-        except (subprocess.SubprocessError, OSError) as exc:
-            _log.debug("pactl %s failed for %s: %s", args[0], endpoint, exc)
-            return
-    _log.debug("pactl: %s set to unity + unmuted", endpoint)
-
-
-def _osascript_set_unity(*, kind: str) -> None:
-    if not shutil.which("osascript"):
-        _log.debug("osascript not on PATH; skipping unity-gain set")
-        return
-    scripts = (
-        ["set volume input volume 100"]
-        if kind == "input"
-        else ["set volume output volume 100", "set volume output muted false"]
-    )
-    for script in scripts:
-        try:
-            subprocess.run(
-                ["osascript", "-e", script], check=True, timeout=2.0, capture_output=True,
-            )
-        except (subprocess.SubprocessError, OSError) as exc:
-            _log.debug("osascript %r failed: %s", script, exc)
-            return
-    _log.debug("osascript: system %s volume set to unity + unmuted", kind)
-
-
 class LiveInputStream:
     """Uniform live-audio input over sounddevice or ``parec``.
 
@@ -235,7 +182,8 @@ class LiveInputStream:
         self._stop_event = threading.Event()
 
     def __enter__(self) -> "LiveInputStream":
-        _set_unity_gain(self._target, kind="input")
+        # Do NOT touch OS-side gain here; the operator sets input volume
+        # on the audio interface directly (pavucontrol / hardware knob).
         if self._target.pulse_name is not None:
             self._open_parec()
         else:
@@ -337,7 +285,8 @@ class LiveOutputStream:
         self._proc: subprocess.Popen[bytes] | None = None
 
     def __enter__(self) -> "LiveOutputStream":
-        _set_unity_gain(self._target, kind="output")
+        # Do NOT touch OS-side gain here; the operator sets output volume
+        # on the audio interface directly (pavucontrol / hardware knob).
         if self._target.pulse_name is not None:
             self._open_paplay()
         else:
