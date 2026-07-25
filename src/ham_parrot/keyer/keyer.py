@@ -47,6 +47,7 @@ from ham_parrot.keyer.audio import (
     LiveInputStream,
     LiveOutputStream,
     read_wav,
+    write_wav,
 )
 from ham_parrot.keyer.constants import (
     BLOCK_FRAMES,
@@ -107,8 +108,15 @@ class Keyer:
         # State is continuous across passthrough / playback / pilot -- avoids
         # a click at the switch, and the modes are mutually exclusive so
         # there is no per-stream contention.
+        self._eq_gains_db = eq_gains_db
         sos = build_radio_sos(SAMPLE_RATE_HZ, eq_gains_db=eq_gains_db)
         self._radio_filter = RadioFilter(sos)
+
+        # Companion WAV that has the same audio as the raw recording but
+        # run through the current filter chain once, offline. Regenerated
+        # on every startup and every stop-recording so it always reflects
+        # the current --eq-json curve.
+        self._eq_recording_path = recording_path.with_stem(recording_path.stem + "_eq")
 
         # Rate-limits the mic-clip warning so a hot mic doesn't flood stdout.
         self._last_clip_warn_time: float = 0.0
@@ -148,16 +156,24 @@ class Keyer:
     def toggle_recording(self) -> str:
         """Start recording if idle, stop if already recording. Returns a
         short human-readable status for the CLI to print."""
+        stopped = False
         with self._mode_lock:
             if self._mode == _MODE_RECORDING:
                 self._mode = _MODE_PASSTHROUGH
                 self._close_recorder()
-                return f"recording saved -> {self._recording_path}"
-            if self._mode != _MODE_PASSTHROUGH:
+                stopped = True
+            elif self._mode != _MODE_PASSTHROUGH:
                 return f"cannot record while {self._mode}"
-            self._open_recorder()
-            self._mode = _MODE_RECORDING
-            return "recording started (press 'r' again to stop)"
+            else:
+                self._open_recorder()
+                self._mode = _MODE_RECORDING
+                return "recording started (press 'r' again to stop)"
+        # Render the _eq.wav companion outside the lock: a long recording
+        # can take a second or two to filter and we don't want to block
+        # the mixer thread's mode reads while it renders.
+        if stopped:
+            self._render_eq_wav()
+        return f"recording saved -> {self._recording_path}"
 
     def request_playback(self) -> str:
         """Trigger playback of the recorded WAV. Refuses if the radio is
@@ -197,6 +213,9 @@ class Keyer:
         """Open the mic input + radio output sinks and run the mixer until
         ``stop()`` is called. The monitor sink is opened per playback /
         pilot session inside ``_run_playback`` / ``_run_pilot``."""
+        # Refresh the _eq.wav companion at startup: the operator may have
+        # tweaked --eq-json between runs, so the file on disk is stale.
+        self._render_eq_wav()
         with (
             LiveInputStream(
                 sample_rate=SAMPLE_RATE_HZ,
@@ -447,6 +466,42 @@ class Keyer:
             except Exception as exc:
                 _log.warning("recorder close failed: %s", exc)
             self._recorder = None
+
+    # ---- Offline EQ render ------------------------------------------------
+
+    def _render_eq_wav(self) -> None:
+        """Read the raw ``recording.wav`` and write a companion
+        ``recording_eq.wav`` that has been run through the current
+        filter chain (bandpass + EQ) once, offline.
+
+        Called on startup and after every stop-recording so the file
+        always reflects the current ``--eq-json`` curve. If the raw
+        file does not exist, any stale companion is removed instead.
+        """
+        raw = self._recording_path
+        dst = self._eq_recording_path
+        if not raw.exists():
+            if dst.exists():
+                try:
+                    dst.unlink()
+                    _log.info("no raw recording; removed stale %s", dst)
+                except OSError as exc:
+                    _log.warning("could not remove stale %s: %s", dst, exc)
+            return
+        try:
+            samples, _ = read_wav(raw, expected_sample_rate=SAMPLE_RATE_HZ)
+        except HamParrotError as exc:
+            _log.error("cannot read raw recording %s: %s", raw, exc)
+            return
+        # Fresh filter state so the offline render is deterministic and
+        # matches what a first-shot live playback would sound like.
+        filt = RadioFilter(build_radio_sos(SAMPLE_RATE_HZ, eq_gains_db=self._eq_gains_db))
+        out = filt.apply(samples).astype(np.float32, copy=False)
+        np.clip(out, -1.0, 1.0, out=out)
+        write_wav(dst, out, SAMPLE_RATE_HZ)
+        seconds = out.size / SAMPLE_RATE_HZ
+        _log.info("rendered %s (%.1f s)", dst, seconds)
+        print(f"eq render -> {dst} ({seconds:.1f} s)")
 
 
 # CLI convenience: build + run a keyer with parsed args, converting
