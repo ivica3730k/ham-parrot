@@ -303,16 +303,16 @@ class Keyer:
             except Exception as exc:
                 _log.warning("recorder write failed: %s", exc)
 
-    def _emit(self, source: np.ndarray, radio_gain: float) -> None:
+    def _emit(self, source: np.ndarray, radio_gain: float, *, filtered: bool = True) -> None:
         """Scale ``source`` independently for each sink and write it out.
         Used for playback + pilot (on-air content); mic passthrough uses
         its own radio-only path so the monitor never carries mic audio.
 
-        The radio path is bandpass-filtered (and EQ'd when configured);
-        the monitor gets the raw source so the operator hears what the
-        transmit chain sounds like before filtering.
+        ``filtered=False`` skips the bandpass + EQ on the radio path --
+        used when the source is already pre-filtered (e.g. reading
+        ``recording_eq.wav`` back).
         """
-        self._write_to_radio(source, radio_gain)
+        self._write_to_radio(source, radio_gain, filtered=filtered)
         if self._monitor_sink is not None:
             monitor_out = np.asarray(source, dtype=np.float32) * self._monitor_gain
             np.clip(monitor_out, -1.0, 1.0, out=monitor_out)
@@ -321,15 +321,16 @@ class Keyer:
             except Exception as exc:
                 _log.warning("monitor sink write failed: %s", exc)
 
-    def _write_to_radio(self, source: np.ndarray, gain: float) -> None:
-        """Common radio-write path: gain, then filter (bandpass + EQ),
-        then hard-clip at ±1.0, then write. All three call-sites
-        (passthrough, playback, pilot) go through here so the chain is
-        applied uniformly."""
+    def _write_to_radio(self, source: np.ndarray, gain: float, *, filtered: bool = True) -> None:
+        """Common radio-write path: gain, then (optionally) filter
+        (bandpass + EQ), then hard-clip at ±1.0, then write. Passthrough
+        and pilot use ``filtered=True``; pre-filtered WAV playback uses
+        ``filtered=False`` to avoid double-filtering."""
         if self._radio_sink is None:
             return
         audio = np.asarray(source, dtype=np.float32) * gain
-        audio = self._radio_filter.apply(audio)
+        if filtered:
+            audio = self._radio_filter.apply(audio)
         np.clip(audio, -1.0, 1.0, out=audio)
         try:
             self._radio_sink.write(audio)
@@ -348,13 +349,23 @@ class Keyer:
     # ---- Playback --------------------------------------------------------
 
     def _run_playback(self) -> None:
+        # Prefer the pre-filtered companion so we don't run the IIR
+        # chain twice for every playback. Falls back to raw with live
+        # filtering if the companion was deleted between renders.
+        if self._eq_recording_path.exists():
+            src_path = self._eq_recording_path
+            live_filter = False
+        else:
+            src_path = self._recording_path
+            live_filter = True
         try:
-            samples, rate = read_wav(self._recording_path, expected_sample_rate=SAMPLE_RATE_HZ)
+            samples, rate = read_wav(src_path, expected_sample_rate=SAMPLE_RATE_HZ)
         except HamParrotError as exc:
-            _log.error("cannot read %s: %s", self._recording_path, exc)
+            _log.error("cannot read %s: %s", src_path, exc)
             print(f"playback failed: {exc}")
             return
-        _log.info("playback: %d frames @ %d Hz", samples.size, rate)
+        _log.info("playback: %s (%d frames @ %d Hz, filter=%s)",
+                  src_path.name, samples.size, rate, "live" if live_filter else "pre-rendered")
 
         with self._mode_lock:
             self._mode = _MODE_PLAYBACK
@@ -370,7 +381,7 @@ class Keyer:
                     if self._stop_event.is_set():
                         break
                     chunk = samples[start : start + BLOCK_FRAMES]
-                    self._emit(chunk, self._playback_gain)
+                    self._emit(chunk, self._playback_gain, filtered=live_filter)
                 completed = not self._stop_event.is_set()
         except PTTError as exc:
             _log.error("playback aborted: %s", exc)
