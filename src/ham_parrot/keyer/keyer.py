@@ -364,9 +364,14 @@ class Keyer:
         ``filtered=False`` skips the bandpass + EQ on the radio path --
         used when the source is already pre-filtered (e.g. reading
         ``recording_eq.wav`` back).
+
+        When an RX tap is wired to the monitor, the monitor is treated
+        as RX-only -- the operator wants to hear the radio in their
+        headphones, not their own voice / pilot tone bleeding back
+        through the same sink -- so we skip the monitor write here.
         """
         self._write_to_radio(source, radio_gain, filtered=filtered)
-        if self._monitor_sink is not None:
+        if self._monitor_sink is not None and self._rx_target is None:
             monitor_out = np.asarray(source, dtype=np.float32) * self._monitor_gain
             np.clip(monitor_out, -1.0, 1.0, out=monitor_out)
             try:
