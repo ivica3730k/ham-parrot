@@ -57,27 +57,38 @@ def _build_parser() -> argparse.ArgumentParser:
         "a numeric index, or 'pulse:<name>' to force the Pulse path.",
     )
     parser.add_argument(
-        "--radio-audio-device",
+        "--radio-tx-audio-device",
         type=str,
         default=None,
-        help="Audio output device on this host that feeds the radio's mic / line-in. "
-        "Same device-hint syntax as --mic-device but resolves against output devices "
-        "(e.g. `alsa_output.usb-...` on Linux). Do NOT pass a source / input name here.",
+        help="Audio output device on this host that feeds the radio's mic / line-in "
+        "(the TX path). Same device-hint syntax as --mic-device but resolves against "
+        "output devices (e.g. `alsa_output.usb-...` on Linux). Do NOT pass a source / "
+        "input name here.",
+    )
+    parser.add_argument(
+        "--radio-rx-audio-device",
+        type=str,
+        default=None,
+        help="Audio *input* device on this host that captures the radio's speaker / "
+        "line-out (the RX path). When set together with --monitor-enable, whatever "
+        "the radio hears is piped to the monitor sink while we're in RX mode "
+        "(passthrough / recording). Same device-hint syntax as --mic-device.",
     )
     parser.add_argument(
         "--monitor-enable",
         action="store_true",
         default=False,
-        help="Enable local monitoring (headphones / speakers). Same content as goes "
-        "to the radio. Off by default so the recorded voice doesn't leak into a "
-        "shack mic that's still hot.",
+        help="Enable local monitoring (headphones / speakers). Carries what goes on-air "
+        "during playback / pilot, and -- if --radio-rx-audio-device is set -- carries "
+        "the radio's RX audio while in passthrough / recording. Off by default so the "
+        "recorded voice doesn't leak into a shack mic that's still hot.",
     )
     parser.add_argument(
         "--monitor-device",
         type=str,
         default=None,
         help="Optional monitor output device (only used when --monitor-enable is set). "
-        "Same syntax as --radio-audio-device. Leave unset to use the OS default output.",
+        "Same syntax as --radio-tx-audio-device. Leave unset to use the OS default output.",
     )
     parser.add_argument(
         "--hamlib-ptt",
@@ -165,9 +176,11 @@ def _validate_levels(args: argparse.Namespace) -> None:
             )
 
 
-def _resolve_devices(args: argparse.Namespace) -> tuple[AudioTarget, AudioTarget, AudioTarget | None]:
+def _resolve_devices(
+    args: argparse.Namespace,
+) -> tuple[AudioTarget, AudioTarget, AudioTarget | None, AudioTarget | None]:
     mic = resolve_audio_target(args.mic_device, kind="input")
-    radio = resolve_audio_target(args.radio_audio_device, kind="output")
+    radio_tx = resolve_audio_target(args.radio_tx_audio_device, kind="output")
     # Monitor is opt-in. With --monitor-enable and no --monitor-device,
     # resolve_audio_target(None, ...) returns an unbound AudioTarget which
     # the LiveOutputStream opens against the OS default output.
@@ -178,10 +191,20 @@ def _resolve_devices(args: argparse.Namespace) -> tuple[AudioTarget, AudioTarget
     )
     if args.monitor_device and not args.monitor_enable:
         _log.warning("--monitor-device provided without --monitor-enable; monitor stays off")
-    return mic, radio, monitor
+    radio_rx = (
+        resolve_audio_target(args.radio_rx_audio_device, kind="input")
+        if args.radio_rx_audio_device
+        else None
+    )
+    if radio_rx is not None and monitor is None:
+        _log.warning(
+            "--radio-rx-audio-device provided without --monitor-enable; "
+            "RX audio has nowhere to go and will be ignored"
+        )
+    return mic, radio_tx, monitor, radio_rx
 
 
-def _run_key_loop(keyer, stop_event: threading.Event, args, mic, radio, monitor) -> None:  # type: ignore[no-untyped-def]
+def _run_key_loop(keyer, stop_event: threading.Event, args, mic, radio, monitor, radio_rx) -> None:  # type: ignore[no-untyped-def]
     """Raw-mode stdin reader. Runs in the main thread.
 
     Uses ``selectors`` so ``stop_event`` can wake us out of the read
@@ -193,7 +216,7 @@ def _run_key_loop(keyer, stop_event: threading.Event, args, mic, radio, monitor)
     sel.register(fd, selectors.EVENT_READ)
     try:
         tty.setcbreak(fd)
-        _print_banner(keyer, args, mic, radio, monitor)
+        _print_banner(keyer, args, mic, radio, monitor, radio_rx)
         while not stop_event.is_set():
             events = sel.select(timeout=0.1)
             if not events:
@@ -207,15 +230,17 @@ def _run_key_loop(keyer, stop_event: threading.Event, args, mic, radio, monitor)
         sel.close()
 
 
-def _print_banner(keyer, args: argparse.Namespace, mic, radio, monitor) -> None:  # type: ignore[no-untyped-def]
+def _print_banner(keyer, args: argparse.Namespace, mic, radio, monitor, radio_rx) -> None:  # type: ignore[no-untyped-def]
     have = "yes" if keyer.has_recording() else "no"
     monitor_desc = monitor.describe() if monitor is not None else "off"
+    rx_desc = radio_rx.describe() if radio_rx is not None else "off"
     print(
         f"ham-parrot ready.\n"
-        f"  mic     : {mic.describe()}\n"
-        f"  radio   : {radio.describe()}\n"
-        f"  monitor : {monitor_desc}\n"
-        f"  ptt     : {args.hamlib_ptt or 'off'}\n"
+        f"  mic       : {mic.describe()}\n"
+        f"  radio TX  : {radio.describe()}\n"
+        f"  radio RX  : {rx_desc}\n"
+        f"  monitor   : {monitor_desc}\n"
+        f"  ptt       : {args.hamlib_ptt or 'off'}\n"
         f"  recording present: {have} ({keyer.recording_path()})\n"
         "  r = toggle record   ENTER = play   p = toggle pilot   q = quit"
     )
@@ -243,10 +268,11 @@ def _handle_key(ch: bytes, keyer, stop_event: threading.Event) -> None:  # type:
 
 def _run(args: argparse.Namespace) -> int:
     _validate_levels(args)
-    mic, radio, monitor = _resolve_devices(args)
+    mic, radio_tx, monitor, radio_rx = _resolve_devices(args)
     _log.info(
-        "devices: mic=%s radio=%s monitor=%s ptt=%s",
-        mic.describe(), radio.describe(),
+        "devices: mic=%s radio_tx=%s radio_rx=%s monitor=%s ptt=%s",
+        mic.describe(), radio_tx.describe(),
+        radio_rx.describe() if radio_rx is not None else "off",
         monitor.describe() if monitor is not None else "off",
         args.hamlib_ptt or "off",
     )
@@ -257,8 +283,9 @@ def _run(args: argparse.Namespace) -> int:
 
     keyer = build_keyer(
         mic_target=mic,
-        radio_target=radio,
+        radio_target=radio_tx,
         monitor_target=monitor,
+        rx_target=radio_rx,
         recording_path=args.recording_path,
         mic_passthrough_level_percent=args.mic_passthrough_level,
         playback_level_percent=args.playback_level,
@@ -281,7 +308,7 @@ def _run(args: argparse.Namespace) -> int:
     thread.start()
 
     try:
-        _run_key_loop(keyer, stop_event, args, mic, radio, monitor)
+        _run_key_loop(keyer, stop_event, args, mic, radio_tx, monitor, radio_rx)
     except KeyboardInterrupt:
         pass
     finally:

@@ -88,6 +88,7 @@ class Keyer:
         mic_target: AudioTarget,
         radio_target: AudioTarget,
         monitor_target: AudioTarget | None,
+        rx_target: AudioTarget | None,
         recording_path: Path,
         mic_passthrough_gain: float,
         playback_gain: float,
@@ -98,6 +99,12 @@ class Keyer:
         self._mic_target = mic_target
         self._radio_target = radio_target
         self._monitor_target = monitor_target
+        # Optional radio-RX input tap. When paired with a monitor sink, the
+        # RX callback pipes the radio's speaker audio into the monitor while
+        # we're NOT transmitting (passthrough / recording). During playback
+        # and pilot the RX audio is dropped so it doesn't fight the on-air
+        # content on the same monitor sink.
+        self._rx_target = rx_target if monitor_target is not None else None
         self._recording_path = recording_path
         self._mic_passthrough_gain = mic_passthrough_gain
         self._playback_gain = playback_gain
@@ -212,7 +219,9 @@ class Keyer:
     def run(self) -> None:
         """Open the mic input + radio output sinks and run the mixer until
         ``stop()`` is called. The monitor sink is opened per playback /
-        pilot session inside ``_run_playback`` / ``_run_pilot``."""
+        pilot session inside ``_run_playback`` / ``_run_pilot`` -- unless
+        we also have an RX input tap, in which case the monitor is opened
+        for the whole session so RX audio has a persistent destination."""
         # Refresh the _eq.wav companion at startup: the operator may have
         # tweaked --eq-json between runs, so the file on disk is stale.
         self._render_eq_wav()
@@ -231,10 +240,36 @@ class Keyer:
         ):
             self._radio_sink = radio_sink
             try:
-                self._mixer_loop()
+                if self._rx_target is not None and self._monitor_target is not None:
+                    self._run_with_rx_tap()
+                else:
+                    self._mixer_loop()
             finally:
                 self._radio_sink = None
                 self._close_recorder()
+
+    def _run_with_rx_tap(self) -> None:
+        """Variant of ``run()``'s inner loop that keeps a persistent
+        monitor sink open (so RX audio has somewhere to go) and taps the
+        radio's speaker/line-out with an input stream."""
+        with (
+            LiveOutputStream(
+                sample_rate=SAMPLE_RATE_HZ,
+                block_frames=BLOCK_FRAMES,
+                target=self._monitor_target,  # type: ignore[arg-type]
+            ) as monitor_sink,
+            LiveInputStream(
+                sample_rate=SAMPLE_RATE_HZ,
+                block_frames=BLOCK_FRAMES,
+                callback=self._on_rx_block,
+                target=self._rx_target,  # type: ignore[arg-type]
+            ),
+        ):
+            self._monitor_sink = monitor_sink
+            try:
+                self._mixer_loop()
+            finally:
+                self._monitor_sink = None
 
     # ---- Mic-side capture ------------------------------------------------
 
@@ -244,6 +279,24 @@ class Keyer:
             self._mic_q.put_nowait(samples)
         except queue.Full:
             _log.warning("mic queue overflow -- dropping %d frames", samples.size)
+
+    def _on_rx_block(self, samples: np.ndarray) -> None:
+        """Radio-RX callback (parec / sounddevice thread). Forwards the
+        radio's speaker audio to the monitor sink while we're NOT
+        transmitting. During playback / pilot the monitor is carrying
+        on-air content already, so we drop RX blocks to avoid mixing."""
+        sink = self._monitor_sink
+        if sink is None:
+            return
+        with self._mode_lock:
+            if self._mode not in (_MODE_PASSTHROUGH, _MODE_RECORDING):
+                return
+        out = np.asarray(samples, dtype=np.float32) * self._monitor_gain
+        np.clip(out, -1.0, 1.0, out=out)
+        try:
+            sink.write(out)
+        except Exception as exc:
+            _log.warning("rx -> monitor write failed: %s", exc)
 
     # ---- Mixer thread (main thread inside run()) -------------------------
 
@@ -432,8 +485,19 @@ class Keyer:
         """Open the monitor sink for the body, close it on exit. Closing
         after each session guarantees no residual audio bleeds out of
         paplay's ring buffer while the operator is back in passthrough.
+
+        If an RX tap is running the monitor is already open for the whole
+        session (so RX has a persistent destination); in that case this
+        is a no-op and the sink stays up across the playback / pilot.
         """
         if self._monitor_target is None:
+            yield
+            return
+        if self._monitor_sink is not None:
+            # Persistent RX-tap mode: monitor is already open. The RX
+            # callback will stop writing on its own once the mode flips
+            # to PLAYBACK / PILOT, so the on-air content owns the sink
+            # uncontested for the duration.
             yield
             return
         sink = LiveOutputStream(
@@ -522,6 +586,7 @@ def build_keyer(
     mic_target: AudioTarget,
     radio_target: AudioTarget,
     monitor_target: AudioTarget | None,
+    rx_target: AudioTarget | None = None,
     recording_path: Path,
     mic_passthrough_level_percent: float,
     playback_level_percent: float,
@@ -533,6 +598,7 @@ def build_keyer(
         mic_target=mic_target,
         radio_target=radio_target,
         monitor_target=monitor_target,
+        rx_target=rx_target,
         recording_path=recording_path,
         mic_passthrough_gain=_percent_to_gain(mic_passthrough_level_percent),
         playback_gain=_percent_to_gain(playback_level_percent),

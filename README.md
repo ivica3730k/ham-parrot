@@ -19,7 +19,8 @@ poetry install
 ```sh
 ham-parrot \
     --mic-device "USB Audio" \
-    --radio-audio-device "USB Audio" \
+    --radio-tx-audio-device "USB Audio" \
+    --radio-rx-audio-device "USB Audio" \
     --monitor-enable --monitor-device "MacBook Pro Speakers" \
     --hamlib-ptt localhost:4532 \
     --mic-passthrough-level 100 \
@@ -43,9 +44,10 @@ the action is refused so you don't collide with an ongoing over.
 
 | Flag | Meaning |
 | ---- | ------- |
-| `--mic-device` | Audio input device to read your voice from. Same device-hint syntax as `--radio-audio-device`. |
-| `--radio-audio-device` | Audio *output* device on this host that feeds the radio's mic / line-in. On Linux this is typically `alsa_output.usb-...` — do not pass a source / input name. |
-| `--monitor-enable` | Turn on local monitoring (off by default). Monitor is silent during passthrough (so mic bleed can't feed back through your headphones) and plays only what goes on-air during playback and pilot. |
+| `--mic-device` | Audio input device to read your voice from. Same device-hint syntax as `--radio-tx-audio-device`. |
+| `--radio-tx-audio-device` | Audio *output* device on this host that feeds the radio's mic / line-in (the TX path). On Linux this is typically `alsa_output.usb-...` — do not pass a source / input name. |
+| `--radio-rx-audio-device` | Optional audio *input* device that captures the radio's speaker / line-out (the RX path). When set with `--monitor-enable`, the radio's audio is piped to the monitor sink while the keyer is in RX (passthrough / recording). Ignored if the monitor is off. |
+| `--monitor-enable` | Turn on local monitoring (off by default). Carries on-air content during playback / pilot; also carries the radio's RX audio while in passthrough / recording if `--radio-rx-audio-device` is set. Mic passthrough itself never hits the monitor (so mic bleed can't feed back through your headphones). |
 | `--monitor-device` | Optional monitor output device (only used when `--monitor-enable` is set). Leave unset for the OS default. |
 | `--hamlib-ptt HOST:PORT` | rigctld endpoint. Bare `--hamlib-ptt` defaults to `localhost:4532`; omit entirely for VOX / manual keying. |
 | `--mic-passthrough-level 0-500` | Gain (percent, linear) applied to the live mic → radio passthrough. 100 = unity, 200 = +6 dB, 500 = +14 dB. Overshoots past ±1.0 are hard-clipped. |
