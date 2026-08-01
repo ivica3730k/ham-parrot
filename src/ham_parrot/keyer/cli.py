@@ -191,11 +191,35 @@ def _resolve_devices(
     )
     if args.monitor_device and not args.monitor_enable:
         _log.warning("--monitor-device provided without --monitor-enable; monitor stays off")
-    radio_rx = (
-        resolve_audio_target(args.radio_rx_audio_device, kind="input")
-        if args.radio_rx_audio_device
-        else None
-    )
+    radio_rx: AudioTarget | None = None
+    if args.radio_rx_audio_device:
+        radio_rx = resolve_audio_target(args.radio_rx_audio_device, kind="input")
+        # Refuse to fall through to the OS-default input: on a Mac the
+        # default input is the built-in mic, which would pipe the
+        # operator's voice straight into the headphones via the RX tap
+        # and look like a bug in our code.
+        if radio_rx.sd_index is None and radio_rx.pulse_name is None:
+            raise ConfigError(
+                f"--radio-rx-audio-device {args.radio_rx_audio_device!r} did not "
+                "match any input device -- refusing to fall back to the OS default "
+                "(which is typically the built-in mic and would loop your voice "
+                "into the headphones). Pass a substring that matches your rig's "
+                "line-out input, or `pulse:<name>` / a numeric index."
+            )
+        if (
+            radio_rx.sd_index is not None
+            and mic.sd_index is not None
+            and radio_rx.sd_index == mic.sd_index
+        ) or (
+            radio_rx.pulse_name is not None
+            and mic.pulse_name is not None
+            and radio_rx.pulse_name == mic.pulse_name
+        ):
+            _log.warning(
+                "--radio-rx-audio-device resolved to the same device as --mic-device "
+                "(%s); the RX tap will pipe your mic into the headphones",
+                radio_rx.describe(),
+            )
     if radio_rx is not None and monitor is None:
         _log.warning(
             "--radio-rx-audio-device provided without --monitor-enable; "
